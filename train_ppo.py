@@ -4,7 +4,7 @@ from typing import Optional
 
 import tyro
 
-from ppo_rgb import PPOArgs, train
+from ppo_main import PPOArgs, train
 
 
 def _load_env_kwargs(path: Optional[str]) -> dict:

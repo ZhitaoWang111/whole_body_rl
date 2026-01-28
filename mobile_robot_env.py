@@ -849,22 +849,22 @@ class PiperEnv(gym.Env):
 
         # debug check
 
-        # if self.step_number % 10 == 0:
-        #     print(
-        #         f"[grasp_ready_debug] step={self.step_number} "
-        #         f"base_ready={base_ready} ee_ready={ee_ready} gripper_open={gripper_open} "
-        #         f"dist_ee={dist_ee:.3f} gripper_qpos={gripper_qpos:.3f} "
-        #         f"base_in_box={base_in_box} v_ok={v_ok} omega_ok={omega_ok} "
-        #         f"v_base={v_base:.3f}/{v_max:.3f} omega_base={omega_base:.3f}/{omega_max:.3f}"
-        #     )
-        # if self.step_number % 10 == 0:
-        #     print(
-        #         f"[base_ready_debug] step={self.step_number} "
-        #         f"base_xy=({base_xy[0]:.3f},{base_xy[1]:.3f}) "
-        #         f"box_x=[{x_min:.3f},{x_max:.3f}] box_y=[{y_min:.3f},{y_max:.3f}] "
-        #         f"base_in_box={base_in_box} v_ok={v_ok} omega_ok={omega_ok} "
-        #         f"v_base={v_base:.3f}/{v_max:.3f} omega_base={omega_base:.3f}/{omega_max:.3f}"
-            # )
+        if self.step_number % 10 == 0:
+            print(
+                f"[grasp_ready_debug] step={self.step_number} "
+                f"base_ready={base_ready} ee_ready={ee_ready} gripper_open={gripper_open} "
+                f"dist_ee={dist_ee:.3f} gripper_qpos={gripper_qpos:.3f} "
+                f"base_in_box={base_in_box} v_ok={v_ok} omega_ok={omega_ok} "
+                f"v_base={v_base:.3f}/{v_max:.3f} omega_base={omega_base:.3f}/{omega_max:.3f}"
+            )
+        if self.step_number % 10 == 0:
+            print(
+                f"[base_ready_debug] step={self.step_number} "
+                f"base_xy=({base_xy[0]:.3f},{base_xy[1]:.3f}) "
+                f"box_x=[{x_min:.3f},{x_max:.3f}] box_y=[{y_min:.3f},{y_max:.3f}] "
+                f"base_in_box={base_in_box} v_ok={v_ok} omega_ok={omega_ok} "
+                f"v_base={v_base:.3f}/{v_max:.3f} omega_base={omega_base:.3f}/{omega_max:.3f}"
+            )
 
         # ===== 3. grasp 成功与过程奖励（需要 base_ready + ee_ready） =====
         both_fingers_contact = self._check_gripper_contact_with_object(self.bottle_body_name)

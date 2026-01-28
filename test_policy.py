@@ -235,7 +235,7 @@ def main():
     parser.add_argument(
         "--policy",
         type=str,
-        default="/home/wzt/wzt/mycode/whole_body_rl/runs/whole_body_RL_try2/1100.pt",
+        default="/home/wzt/wzt/mycode/whole_body_rl/runs/whole_body_RL_try4/50.pt",
         help="Path to policy checkpoint",
     )
     parser.add_argument("--episodes", type=int, default=3,
