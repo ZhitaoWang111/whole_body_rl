@@ -39,16 +39,22 @@ class MLP_Agent(nn.Module):
         x = self.feature_net(x)
         return self.critic(x.detach())
     
+    @staticmethod
+    def _atanh(x: torch.Tensor) -> torch.Tensor:
+        # clamp for numerical stability
+        x = torch.clamp(x, -1 + 1e-6, 1 - 1e-6)
+        return 0.5 * (torch.log1p(x) - torch.log1p(-x))
+
     def get_action(self, x, deterministic=False):
         x = self.feature_net(x)
         action_mean = self.actor_mean(x)
         if deterministic:
-            return action_mean
+            return torch.tanh(action_mean)
         action_logstd = self.actor_logstd.clamp(-20, 2).expand_as(action_mean)
         action_std = torch.exp(action_logstd)
-        probs = Normal(action_mean, action_std)
-        # return probs.sample()
-        return action_mean
+        dist = Normal(action_mean, action_std)
+        raw_action = dist.sample()
+        return torch.tanh(raw_action)
     
     def get_action_and_value(self, x, action=None):
         x = self.feature_net(x)
@@ -57,5 +63,14 @@ class MLP_Agent(nn.Module):
         action_std = torch.exp(action_logstd)
         dist = Normal(action_mean, action_std)
         if action is None:
-            action = dist.sample()
-        return action, dist.log_prob(action).sum(1), dist.entropy().sum(1), self.critic(x.detach())
+            raw_action = dist.sample()
+            action = torch.tanh(raw_action)
+            squashed_action = action
+        else:
+            squashed_action = torch.clamp(action, -1 + 1e-6, 1 - 1e-6)
+            raw_action = self._atanh(squashed_action)
+        # log prob with tanh correction
+        logprob = dist.log_prob(raw_action).sum(1)
+        logprob -= torch.log(1 - squashed_action.pow(2) + 1e-6).sum(1)
+        entropy = dist.entropy().sum(1)
+        return action, logprob, entropy, self.critic(x.detach())

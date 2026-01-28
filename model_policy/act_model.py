@@ -85,7 +85,7 @@ class ACTPolicy(nn.Module):
         """Run the batch through the model and compute the loss for training or validation."""
 
         batch = dict()  # shallow copy so that adding a key doesn't modify the original
-        batch[OBS_IMAGES] = [obs_dict[key] for key in ["rgb", "left_wrist_rgb", "right_wrist_rgb"] if key in obs_dict]
+        batch[OBS_IMAGES] = [obs_dict[key] for key in ["top_rgb", "left_wrist_rgb", "right_wrist_rgb"] if key in obs_dict]
         batch[OBS_STATE] = obs_dict['state']
 
         actions_hat, (mu_hat, log_sigma_x2_hat), value = self.model(batch)

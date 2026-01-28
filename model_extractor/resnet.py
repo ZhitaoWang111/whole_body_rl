@@ -13,7 +13,7 @@ class ResNet(nn.Module):
         in_channels = 3 
         feature_size = 256 
 
-        image_keys = ["rgb", "left_wrist_rgb", "right_wrist_rgb"]
+        image_keys = ["top_rgb", "left_wrist_rgb", "right_wrist_rgb"]
         for key in image_keys:
             if key in sample_obs:
                 backbone_model = models.resnet18(
@@ -45,7 +45,7 @@ class ResNet(nn.Module):
         for key, extractor in self.extractors.items():
             obs = observations[key]
             
-            if key in ["rgb", "left_wrist_rgb", "right_wrist_rgb"]:
+            if key in ["top_rgb", "left_wrist_rgb", "right_wrist_rgb"]:
                 obs = obs.float().permute(0, 3, 1, 2)
                 obs = obs / 255.0
                 features = extractor[0](obs)['feature_map']     # backbone

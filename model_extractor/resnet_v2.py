@@ -34,10 +34,10 @@ class ResNet(nn.Module):
         if "state" in sample_obs:
             state_in = sample_obs["state"].shape[-1]
             self.state_encoder = nn.Linear(state_in, state_proj_out)
-        # ==== target delta 编码器 ====
+        # ==== target 编码器 ====
         self.tgt_pos_encoder = None
-        if "tgt_delta" in sample_obs:
-            tgt_in = sample_obs["tgt_delta"].shape[-1]
+        if "target" in sample_obs:
+            tgt_in = sample_obs["target"].shape[-1]
             self.tgt_pos_encoder = nn.Sequential(
                 nn.Linear(tgt_in, 128),
                 nn.ReLU(inplace=True),
@@ -72,7 +72,7 @@ class ResNet(nn.Module):
 
         if self.state_encoder is not None and "state" in observations:
             encoded.append(self.state_encoder(observations["state"]))
-        if self.tgt_pos_encoder is not None and "tgt_delta" in observations:
-            encoded.append(self.tgt_pos_encoder(observations["tgt_delta"]))
+        if self.tgt_pos_encoder is not None and "target" in observations:
+            encoded.append(self.tgt_pos_encoder(observations["target"]))
 
         return torch.cat(encoded, dim=1)

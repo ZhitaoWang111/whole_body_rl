@@ -22,24 +22,27 @@ class PiperEnv(gym.Env):
     
     Task: Left arm grabs hot dog and places it in basket
     """
-    def __init__(self, render_mode=None, gs_render=True, max_episode_length=80):
+    def __init__(
+        self,
+        visualization: bool = False,
+        gs_render: bool = True,
+        max_episode_length: int = 80,
+        use_top_rgb: bool = True,
+        use_left_wrist_rgb: bool = True,
+        use_right_wrist_rgb: bool = False,
+    ):
         super(PiperEnv, self).__init__()
-        script_dir = os.path.dirname(os.path.realpath(__file__)) 
-        ws_dir = os.path.dirname(script_dir)
-        xml_path = os.path.join(ws_dir, 'model_assets', 'fw_mini_single_piper', 'fw_mini_single_piper.xml')
+        self.assets_dir = '/home/wzt/wzt/mycode/whole_body_rl/model_assets'
+        xml_path = os.path.join(self.assets_dir, 'fw_mini_single_piper', 'fw_mini_single_piper.xml')
 
         self.model = mujoco.MjModel.from_xml_path(xml_path)
         self.model.opt.timestep = 0.002
         self.data = mujoco.MjData(self.model)
         mujoco.mj_forward(self.model, self.data)
 
-        # Support both old and new render API
-        if render_mode is None:
-            self.render_mode = False  # No rendering by default
-        else:
-            self.render_mode = render_mode in ["human", "rgb_array"]
-        
-        if self.render_mode:
+        self.visualization = bool(visualization)
+
+        if self.visualization:
             self.handle = mujoco.viewer.launch_passive(self.model, self.data)   # 创建一个被动渲染窗口(GUI)，可以实时查看仿真过程
             self.handle.cam.distance = 3                                        # 相机与目标的距离为 3
             self.handle.cam.azimuth = 100                                       # 方位角为 0 度
@@ -76,36 +79,69 @@ class PiperEnv(gym.Env):
         self.robot_body_names = ["base_link", "base_arm_link"] + [f"link{i}" for i in range(1, 9)]
 
         # Desk bounds from mesh (local) + desk body pose (world)
-        desk_mesh_min, desk_mesh_max = self._get_mesh_aabb(self.desk_mesh_name)
         desk_pos = np.asarray(self.data.body(self.desk_body_name).xpos, dtype=np.float32)
-        self.desk_top_z = float(desk_pos[2] + desk_mesh_max[2])
-        margin = 0.05
+        self.desk_top_z = 0.86
         self.desk_xy_bounds = (
-            float(desk_pos[0] + desk_mesh_min[0] + margin),
-            float(desk_pos[0] + desk_mesh_max[0] - margin),
-            float(desk_pos[1] + desk_mesh_min[1] + margin),
-            float(desk_pos[1] + desk_mesh_max[1] - margin),
+            desk_pos[0] - 0.25,  # x_min
+            desk_pos[0] - 0.15,  # x_max
+            desk_pos[1] - 0.2,   # y_min
+            desk_pos[1] + 0.2,   # y_max
         )
         # Bottle tipping threshold (cosine of max tilt angle from upright)
         self.bottle_upright_cos = float(np.cos(np.deg2rad(45.0)))
 
         # Reward scaling/limits
-        self.reach_base_max_dist = 1.5  # base to bottle xy (m)
         self.reach_ee_max_dist = 0.5    # ee to grasp (m)
-        self.reach_base_thresh = 0.4
+        self.reach_ee_exp_k = 4.0       # ee 距离奖励指数衰减系数
+        self.reach_ee_scale = 2.0       # ee 接近奖励放大系数（0~2）
         self.reach_ee_thresh = 0.05
         self.gripper_close_thresh = 0.01
-        self.lift_start = 0.02
-        self.lift_target = 0.10
+        self.lift_start = 0.0
+        self.lift_target = 0.05
         self.lift_hold_thresh = 0.06
         self.hold_steps = 10
+        # 抬起阶段奖励参数
+        self.lift_reward_scale = 1.0
+        self.lift_success_bonus = 1.0
+        # 抓取阶段门控参数（分阶段速度限制）
+        self.base_v_max_far = 0.05
+        self.base_omega_max_far = 0.10
+        self.base_v_max_near = 0.03
+        self.base_omega_max_near = 0.05
+        self.gripper_open_threshold = 0.035
+        self.gripper_close_threshold = 0.02
+        self.ee_pos_tol = 0.03
+        self.ee_orient_dist = 0.12  # 夹爪朝向奖励启用距离
+        self.ee_orient_scale = 0.3  # 夹爪朝向奖励系数
+        self.grasp_ready_bonus = 0.5
+        self.grasp_contact_steps = 5
+        self.grasp_progress_scale = 0.5
+        # 惩罚参数
+        self.penalty_object_fell = 5.0
+        self.penalty_object_tipped = 3.0
+        self.penalty_table_contact = 0.2
+        self.penalty_early_close = 0.02
+        self.penalty_base_motion = 0.02
+        self.penalty_time = 0.001
+        self.table_contact_terminate_steps = 10  # 累计接触桌面次数达到即终止
+        self.table_contact_count = 0
+        # 底盘到达区（相对瓶子位置的矩形范围）
+        self.base_reach_x_range = (-0.5, -0.25)
+        self.base_reach_y_range = (-0.25, 0.25)
+        # 底盘朝向侧向分量阈值（|sin|）
+        self.base_facing_cos = float(np.cos(np.deg2rad(30.0)))
+        # 底盘位置奖励参数
+        self.base_reach_max_dist = 0.5
+        self.base_reach_exp_k = 4.0
+        self.base_progress_scale = 1.0
 
         # Bottle rest height offset relative to desk top
-        bottle_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, self.bottle_body_name)
-        bottle_joint_id = self.model.body_jntadr[bottle_body_id]
-        bottle_qposadr = self.model.jnt_qposadr[bottle_joint_id]
-        bottle_init_z = float(self.model.qpos0[bottle_qposadr + 2])
-        self.bottle_z_offset = max(0.02, bottle_init_z - self.desk_top_z)
+        # bottle_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, self.bottle_body_name)
+        # bottle_joint_id = self.model.body_jntadr[bottle_body_id]
+        # bottle_qposadr = self.model.jnt_qposadr[bottle_joint_id]
+        # bottle_init_z = float(self.model.qpos0[bottle_qposadr + 2])
+        # self.bottle_z_offset = max(0.02, bottle_init_z - self.desk_top_z)
+        # import pdb; pdb.set_trace()
 
         # Base command scaling (m/s, m/s, rad/s)
         # Keep as 1.0 to match cmd_vel semantics (vx, vy, yaw)
@@ -114,17 +150,39 @@ class PiperEnv(gym.Env):
         self.camera_width = 128
         self.camera_height = 128
 
+        self.use_top_rgb = use_top_rgb
+        self.use_left_wrist_rgb = use_left_wrist_rgb
+        self.use_right_wrist_rgb = use_right_wrist_rgb
+
         # Simplified observation space: always left arm
         obs_dict = {
-            'top_rgb': spaces.Box(low=0, high=255, shape=(self.camera_height, self.camera_width, 3), dtype=np.uint8),
-            'left_wrist_rgb': spaces.Box(low=0, high=255, shape=(self.camera_height, self.camera_width, 3), dtype=np.uint8),
-
             # state = [base_x, base_y, joint1..joint6, gripper(0-1)]
             'state': spaces.Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32),
-
             # delta between ee_site and grasp_site (world xyz)
-            'tgt_delta': spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
+            'target': spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
         }
+
+        if self.use_top_rgb:
+            obs_dict['top_rgb'] = spaces.Box(
+                low=0,
+                high=255,
+                shape=(self.camera_height, self.camera_width, 3),
+                dtype=np.uint8,
+            )
+        if self.use_left_wrist_rgb:
+            obs_dict['left_wrist_rgb'] = spaces.Box(
+                low=0,
+                high=255,
+                shape=(self.camera_height, self.camera_width, 3),
+                dtype=np.uint8,
+            )
+        if self.use_right_wrist_rgb:
+            obs_dict['right_wrist_rgb'] = spaces.Box(
+                low=0,
+                high=255,
+                shape=(self.camera_height, self.camera_width, 3),
+                dtype=np.uint8,
+            )
             
         self.observation_space = spaces.Dict(obs_dict)
 
@@ -157,12 +215,6 @@ class PiperEnv(gym.Env):
         
         # Initialize persistent renderer for efficiency
         self._renderer = None
-        if self.render_mode is None:  # Only create for RGB observations
-            try:
-                self._renderer = mujoco.Renderer(self.model, height=self.camera_height, width=self.camera_width)
-            except Exception as e:
-                print(f"Warning: Could not initialize renderer: {e}")
-                self._renderer = None
 
         self.gs_render = gs_render
 
@@ -174,11 +226,9 @@ class PiperEnv(gym.Env):
             self.rgb_width = self.camera_width
             self.rgb_height = self.camera_height
             self.gs_model_dict = {}
-            self.script_dir = os.path.dirname(os.path.abspath(__file__))
-            self.ws_dir = os.path.dirname(self.script_dir)
 
             # 构造 model_assets 的路径
-            self.asset_root = os.path.join(self.ws_dir, "model_assets", "3dgs_asserts")
+            self.asset_root = os.path.join(self.assets_dir, "3dgs_asserts")
 
             # 构造 gs_model_dict 的路径
             self.gs_model_dict["background"] = os.path.join(self.asset_root, "scene", "point_cloud_n.ply")
@@ -338,7 +388,6 @@ class PiperEnv(gym.Env):
         return position, quaternion
 
     def map_action_to_joint_deltas(self, action: np.ndarray) -> np.ndarray:
-        """Map [-1, 1] action to joint angle increments for active arm only."""
         max_delta_per_step = np.array([
             0.05, 0.03, 0.03, 0.03, 0.03, 0.05, 0.005
         ], dtype=np.float32)
@@ -459,8 +508,8 @@ class PiperEnv(gym.Env):
             self.seed(seed)
         
         # Initialize base position using values from model.qpos0
-        qpos_base = self.model.qpos0[0:7].copy()  # Use initial qpos from XML: [-0.85, 1.35, -0.133, 0.68949843, 0.0, 0.0, 0.72428717]
-        qvel_base = np.zeros(6)  # [vx, vy, vz, wx, wy, wz]
+        qpos_base = self.model.qpos0[0:7].copy()    # Use initial qpos from XML: [-0.85, 1.35, -0.133, 0.68949843, 0.0, 0.0, 0.72428717]
+        qvel_base = np.zeros(6)                     # [vx, vy, vz, wx, wy, wz]
         
         # Initialize both arms to default position
         qpos_left = np.zeros(7)
@@ -479,6 +528,9 @@ class PiperEnv(gym.Env):
         self.goal_reached = False
         self.lifted = False
         self.contact_streak = 0
+        self.max_contact_streak = 0
+        self.table_contact_count = 0
+        self.prev_dist_to_box = None
 
         return obs, {}  # Gymnasium API returns (observation, info)
     
@@ -528,11 +580,12 @@ class PiperEnv(gym.Env):
 
         # Reset bottle on the desk within mesh bounds
         x_min, x_max, y_min, y_max = self.desk_xy_bounds
+        # import pdb; pdb.set_trace()
         x = np.random.uniform(x_min, x_max)
         y = np.random.uniform(y_min, y_max)
-        z = self.desk_top_z + self.bottle_z_offset
+        z = self.desk_top_z
         reset_object(self.bottle_body_name, x, y, z, 0.0)
-        # Note: desk is static in XML, so we don't reset its position
+
 
     def _get_rgb_observation(self, camera_name):
         """Get RGB camera observation."""
@@ -567,7 +620,7 @@ class PiperEnv(gym.Env):
             dtype=np.float32,
         )
         gripper_qpos = float(self.data.joint(self.arm_joint_names[6]).qpos[0])
-        gripper_norm = np.clip(gripper_qpos / 0.035, 0.0, 1.0)
+        gripper_norm = np.clip(gripper_qpos / 0.045, 0.0, 1.0)
         return np.concatenate([base_xy, joint_positions, np.array([gripper_norm], dtype=np.float32)], axis=0)
 
     def _get_observation(self):
@@ -575,43 +628,42 @@ class PiperEnv(gym.Env):
         state_obs = self._get_state_observation()
         ee_pos, _ = self._get_site_pos_ori(self.ee_site_name)
         grasp_pos, _ = self._get_site_pos_ori(self.grasp_site_name)
-        tgt_delta = grasp_pos - ee_pos
+        target = grasp_pos - ee_pos
         
+        obs = {
+            'state': state_obs,
+            'target': target,
+        }
+
         if self.gs_render:
-            gs_obs_3rd = self.get_img("top")
-            gs_obs_wrist = self.get_img("wrist_cam")
-            # gs_obs_table_top = self.get_img("table_top_view")
+            if self.use_top_rgb:
+                obs['top_rgb'] = self.get_img("top")
+            if self.use_left_wrist_rgb:
+                obs['left_wrist_rgb'] = self.get_img("wrist_cam")
+            if self.use_right_wrist_rgb:
+                obs['right_wrist_rgb'] = self.get_img("right_wrist_cam")
 
             # Only show cv2 windows when rendering is enabled
-            if self.render_mode:
-                # RGB -> BGR for images
-                bgr_img_3rd = cv2.cvtColor(gs_obs_3rd, cv2.COLOR_RGB2BGR)
-                bgr_img_wrist = cv2.cvtColor(gs_obs_wrist, cv2.COLOR_RGB2BGR)
-
-                cv2.imshow("3rd Person View", bgr_img_3rd)
-                cv2.imshow("Left Wrist Camera View", bgr_img_wrist)
-                # cv2.imshow("Table Top View", bgr_img_table_top)
+            if self.visualization:
+                if self.use_top_rgb:
+                    bgr_img_3rd = cv2.cvtColor(obs['top_rgb'], cv2.COLOR_RGB2BGR)
+                    cv2.imshow("3rd Person View", bgr_img_3rd)
+                if self.use_left_wrist_rgb:
+                    bgr_img_wrist = cv2.cvtColor(obs['left_wrist_rgb'], cv2.COLOR_RGB2BGR)
+                    cv2.imshow("Left Wrist Camera View", bgr_img_wrist)
+                if self.use_right_wrist_rgb:
+                    bgr_img_right = cv2.cvtColor(obs['right_wrist_rgb'], cv2.COLOR_RGB2BGR)
+                    cv2.imshow("Right Wrist Camera View", bgr_img_right)
                 cv2.waitKey(1)
-
-            return {
-                'top_rgb': gs_obs_3rd,
-                'left_wrist_rgb': gs_obs_wrist,
-                # 'table_top_rgb': gs_obs_table_top,
-                'state': state_obs,
-                'tgt_delta': tgt_delta,
-            }
         else:
-            rgb_obs_3rd = self._get_rgb_observation("top")
-            rgb_obs_wrist = self._get_rgb_observation("wrist_cam")
-            # rgb_obs_table_top = self._get_rgb_observation("table_top_view")
-                
-            return {
-                'top_rgb': rgb_obs_3rd,
-                'left_wrist_rgb': rgb_obs_wrist,
-                # 'table_top_rgb': rgb_obs_table_top,
-                'state': state_obs,
-                'tgt_delta': tgt_delta,
-            }
+            if self.use_top_rgb:
+                obs['top_rgb'] = self._get_rgb_observation("top")
+            if self.use_left_wrist_rgb:
+                obs['left_wrist_rgb'] = self._get_rgb_observation("wrist_cam")
+            if self.use_right_wrist_rgb:
+                obs['right_wrist_rgb'] = self._get_rgb_observation("right_wrist_cam")
+
+        return obs
 
     def _check_contact_between_bodies(self, body1_name: str, body2_name: str) -> tuple[bool, float]:
         """Check contact between two bodies."""
@@ -692,50 +744,229 @@ class PiperEnv(gym.Env):
         ee_pos, _ = self._get_site_pos_ori(self.ee_site_name)
         grasp_pos, _ = self._get_site_pos_ori(self.grasp_site_name)
         bottle_pos, _ = self._get_body_pose(self.bottle_body_name)
+        # print('=========== bottle_z:', bottle_pos[2],"===========")
         base_xy = np.asarray(self.data.body("base_link").xpos[:2], dtype=np.float32)
-        bottle_xy = bottle_pos[:2]
+        target_xy = grasp_pos[:2]
+        
 
+        # ===== 1. reaching 奖励（矩形 + 朝向）=====
+        x_min = target_xy[0] + self.base_reach_x_range[0]
+        x_max = target_xy[0] + self.base_reach_x_range[1]
+        y_min = target_xy[1] + self.base_reach_y_range[0]
+        y_max = target_xy[1] + self.base_reach_y_range[1]
+
+        # 1.1 到矩形到达区的最短距离（在区内为 0）
+        dx = max(x_min - base_xy[0], 0.0, base_xy[0] - x_max)
+        dy = max(y_min - base_xy[1], 0.0, base_xy[1] - y_max)
+        dist_to_box = float(np.hypot(dx, dy))
+        base_in_box = (x_min <= base_xy[0] <= x_max) and (y_min <= base_xy[1] <= y_max)         # 判断底盘是否在到达区内
+
+        # 1.2 底盘位置奖励：越接近到达区越高（指数型）
+        exp_max = float(np.exp(-self.base_reach_exp_k * self.base_reach_max_dist))
+        base_pos_reward = (np.exp(-self.base_reach_exp_k * dist_to_box) - exp_max) / (1.0 - exp_max + 1e-6)
+        base_pos_reward = float(np.clip(base_pos_reward, 0.0, 1.0))                              # wandb
+
+        # 1.3 底盘进步奖励：距离持续变小才给
+        if self.prev_dist_to_box is None:
+            base_progress_reward = 0.0
+        else:
+            base_progress_reward = max(self.prev_dist_to_box - dist_to_box, 0.0) * self.base_progress_scale
+        self.prev_dist_to_box = dist_to_box
+
+        # 1.4 底盘朝向奖励：当前朝向计算下，越接近 0 越“正对”
+        to_target = target_xy - base_xy
+        to_target_norm = float(np.linalg.norm(to_target))
+        if to_target_norm < 1e-6:
+            base_angle_reward = 1.0
+            facing_cos = 1.0
+        else:
+            base_xmat = np.asarray(self.data.body("base_link").xmat, dtype=np.float32).reshape(3, 3)
+            heading_xy = base_xmat[:2, 0]  # 取底盘 x 轴作为朝向
+            heading_norm = float(np.linalg.norm(heading_xy)) + 1e-6
+            heading_xy = heading_xy / heading_norm
+            dir_xy = to_target / to_target_norm
+            facing_cos = float(np.dot(heading_xy, dir_xy))
+            base_angle_reward = 1.0 - abs(facing_cos)
+            base_angle_reward = float(np.clip(base_angle_reward, 0.0, 1.0))                    # wandb
+
+        # 1.5 底盘 reaching 奖励：位置 + 朝向 + 进步
+        reach_base = base_pos_reward * (0.5 + 0.5 * base_angle_reward) + base_progress_reward  # wandb
+
+        # 1.6 夹爪接近奖励：距离越小越高（指数型且连续）
         dist_ee = float(np.linalg.norm(ee_pos - grasp_pos))
-        dist_base = float(np.linalg.norm(base_xy - bottle_xy))
-
-        reach_base = 1.0 - (dist_base / self.reach_base_max_dist)
-        reach_base = float(np.clip(reach_base, 0.0, 1.0))
-        reach_ee = 1.0 - (dist_ee / self.reach_ee_max_dist)
+        exp_max = float(np.exp(-self.reach_ee_exp_k * self.reach_ee_max_dist))
+        reach_ee = (np.exp(-self.reach_ee_exp_k * dist_ee) - exp_max) / (1.0 - exp_max + 1e-6)
         reach_ee = float(np.clip(reach_ee, 0.0, 1.0))
+        # 1.7 到达前保持夹爪打开：未到达时用张开比例调节奖励
+        gripper_qpos = float(self.data.joint(self.arm_joint_names[6]).qpos[0])
+        gripper_open_ratio = float(np.clip(gripper_qpos / 0.045, 0.0, 1.0))
+        if dist_ee > self.reach_ee_thresh:
+            reach_ee *= gripper_open_ratio
+        reach_ee *= self.reach_ee_scale
 
-        reaching = reach_base + reach_ee  # [0, 2]
+        # 1.8 夹爪朝向奖励：接近时让夹爪 z 轴指向瓶子
+        reach_ee_orient = 0.0
+        if dist_ee < self.ee_orient_dist:
+            ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, self.ee_site_name)
+            if ee_site_id != -1:
+                ee_xmat = np.asarray(self.data.site(ee_site_id).xmat, dtype=np.float32).reshape(3, 3)
+                ee_z_axis = ee_xmat[:, 2]
+                ee_z_axis = ee_z_axis / (float(np.linalg.norm(ee_z_axis)) + 1e-6)
+                to_grasp = grasp_pos - ee_pos
+                to_grasp_norm = float(np.linalg.norm(to_grasp))
+                if to_grasp_norm > 1e-6:
+                    dir_xyz = to_grasp / to_grasp_norm
+                    orient_cos_z = float(np.dot(ee_z_axis, dir_xyz))
+                    reach_ee_orient = self.ee_orient_scale * max(orient_cos_z, 0.0)
+                    # print('=========== ee_orient_cos_z:', orient_cos_z,"===========")
 
-        # Collision only suppresses reward (no negative values)
-        table_contact, _ = self._check_robot_table_contact()
-        if table_contact:
-            reaching = 0.0
 
+        # 1.9 总 reaching 奖励
+        reaching = reach_base + reach_ee + reach_ee_orient  # [0, 2]                             # wandb
         reward += reaching
 
-        reach_done = (dist_base < self.reach_base_thresh) and (dist_ee < self.reach_ee_thresh) and (not table_contact)
 
-        # --- Stage 2: Lift ---
+        # ===== 2. grasp_ready 奖励（矩形 + 朝向）=====
+
+        v_base = float(np.linalg.norm(self.data.qvel[0:3]))
+        omega_base = float(np.linalg.norm(self.data.qvel[3:6]))
+
+        # 末端接近时更严格，远距离时更宽松
+        v_max = self.base_v_max_near            if dist_ee < 0.05 else self.base_v_max_far
+        omega_max = self.base_omega_max_near    if dist_ee < 0.05 else self.base_omega_max_far
+        v_ok = v_base < v_max
+        omega_ok = omega_base < omega_max
+        base_ready = base_in_box and v_ok and omega_ok  # wandb
+
+        gripper_open = gripper_qpos > self.gripper_open_threshold                                       # wandb    
+        ee_ready = dist_ee < self.ee_pos_tol
+ 
+        base_ready_reward = 0.0                                                                          # wandb
+        ee_ready_reward = self.grasp_ready_bonus if (base_ready and ee_ready) else 0.0                   # wandb
+        reward += ee_ready_reward
+
+        grasp_ready = base_ready and gripper_open and ee_ready
+
+        # debug check
+
+        # if self.step_number % 10 == 0:
+        #     print(
+        #         f"[grasp_ready_debug] step={self.step_number} "
+        #         f"base_ready={base_ready} ee_ready={ee_ready} gripper_open={gripper_open} "
+        #         f"dist_ee={dist_ee:.3f} gripper_qpos={gripper_qpos:.3f} "
+        #         f"base_in_box={base_in_box} v_ok={v_ok} omega_ok={omega_ok} "
+        #         f"v_base={v_base:.3f}/{v_max:.3f} omega_base={omega_base:.3f}/{omega_max:.3f}"
+        #     )
+        # if self.step_number % 10 == 0:
+        #     print(
+        #         f"[base_ready_debug] step={self.step_number} "
+        #         f"base_xy=({base_xy[0]:.3f},{base_xy[1]:.3f}) "
+        #         f"box_x=[{x_min:.3f},{x_max:.3f}] box_y=[{y_min:.3f},{y_max:.3f}] "
+        #         f"base_in_box={base_in_box} v_ok={v_ok} omega_ok={omega_ok} "
+        #         f"v_base={v_base:.3f}/{v_max:.3f} omega_base={omega_base:.3f}/{omega_max:.3f}"
+            # )
+
+        # ===== 3. grasp 成功与过程奖励（需要 base_ready + ee_ready） =====
+        both_fingers_contact = self._check_gripper_contact_with_object(self.bottle_body_name)
+        if base_ready and ee_ready and both_fingers_contact:
+            self.contact_streak += 1
+        else:
+            self.contact_streak = 0
+        self.max_contact_streak = max(self.max_contact_streak, self.contact_streak)
+
+        gripper_closed = gripper_qpos < self.gripper_close_threshold                                                            # 夹爪是否闭合到阈值
+        contact_ratio = float(np.clip(self.contact_streak / self.grasp_contact_steps, 0.0, 1.0))                                # 接触步数归一化
+        close_ratio = float(np.clip((self.gripper_close_threshold - gripper_qpos) / self.gripper_close_threshold, 0.0, 1.0))    # 闭合程度归一化
+        grasp_progress = contact_ratio * close_ratio                                                                            # 接触+闭合的进度
+        catch_reward = self.grasp_progress_scale * grasp_progress if (base_ready and ee_ready) else 0.0                         # 仅门控通过才给奖励
+        reward += catch_reward
+
+        catch_success = (
+            base_ready
+            and ee_ready
+            and both_fingers_contact
+            and gripper_closed
+            and (self.contact_streak >= self.grasp_contact_steps)
+        )
+
+        # ===== 4. lifting 奖励（需要 catch_success）=====
         dz = bottle_pos[2] - self.desk_top_z
-        lift = float(np.clip((dz - self.lift_start) / (self.lift_target - self.lift_start), 0.0, 1.0))
-        lifting = 2.0 * lift if reach_done else 0.0
+        # 4.1 连续抬起奖励（仅在抓稳后）
+        lift_progress = float(np.clip((dz - self.lift_start) / (self.lift_target - self.lift_start), 0.0, 1.0))
+        lifting = self.lift_reward_scale * lift_progress if catch_success else 0.0
         reward += lifting
 
+        # 4.2 成功抬起奖励（每步给，需抓稳）
+        lift_success_bonus = self.lift_success_bonus if (catch_success and dz >= self.lift_target) else 0.0
+        reward += lift_success_bonus
+
         # Success: bottle lifted above target height
-        if dz > self.lift_target:
+        if catch_success and (dz >= self.lift_target):
             self.goal_reached = True
+
+        # ===== 5. 惩罚项 =====
+        object_fell = self._check_object_fell_off_table(self.bottle_body_name)
+        object_tipped = self._check_object_tipped(self.bottle_body_name)
+        table_contact, _ = self._check_robot_table_contact()
+        if table_contact:
+            self.table_contact_count += 1
+            # print('=== Robot-table contact count:', self.table_contact_count, '===')
+        table_contact_terminated = self.table_contact_count >= self.table_contact_terminate_steps
+
+        penalties = 0.0
+        if object_fell:
+            penalties -= self.penalty_object_fell
+        if object_tipped:
+            penalties -= self.penalty_object_tipped
+        if table_contact:
+            penalties -= self.penalty_table_contact
+
+        # base_ready 前闭合夹爪惩罚
+        if (not base_ready) and (gripper_qpos < self.gripper_close_threshold):
+            penalties -= self.penalty_early_close
+        # 抓取/抬起阶段底盘乱动惩罚
+        if (grasp_ready or catch_success) and (not base_ready):
+            penalties -= self.penalty_base_motion
+
+        # 时间惩罚
+        penalties -= self.penalty_time
+        reward += penalties
 
         reward_dict = {
             "reaching": reaching,
             "reach_base": reach_base,
+            "reach_base_pos": base_pos_reward,
+            "reach_base_angle": base_angle_reward,
+            "reach_base_progress": base_progress_reward,
+            "reach_base_in_box": float(base_in_box),
             "reach_ee": reach_ee,
+            "reach_ee_orient": reach_ee_orient,
+            "gripper_open_ratio": gripper_open_ratio,
+            "gripper_open": float(gripper_open),
+            "grasp_ready": float(grasp_ready),
+            "base_ready_reward": base_ready_reward,
+            "ee_ready_reward": ee_ready_reward,
+            "both_fingers_contact": float(both_fingers_contact),
+            "gripper_closed": float(gripper_closed),
+            "contact_streak": float(self.contact_streak),
+            "grasp_progress": grasp_progress,
+            "catch_reward": catch_reward,
+            "catch_success": float(catch_success),
             "lifting": lifting,
+            "lift_progress": lift_progress,
+            "lift_success_bonus": lift_success_bonus,
+            "object_fell": float(object_fell),
+            "object_tipped": float(object_tipped),
             "table_contact": float(table_contact),
+            "table_contact_count": float(self.table_contact_count),
+            "table_contact_terminated": float(table_contact_terminated),
+            "penalties": penalties,
         }
         return reward, reward_dict
 
     def step(self, action):
         """Execute one environment step for left arm only."""
-        base_cmd = np.asarray(action[:3], dtype=np.float32) * self.base_cmd_scale
+        base_cmd = np.asarray(action[:3], dtype=np.float32) * self.base_cmd_scale   # 这里的动作范围都是 [-1, 1]
         delta_action = self.map_action_to_joint_deltas(action[3:])
         
         # Get current joint positions for left arm
@@ -753,7 +984,7 @@ class PiperEnv(gym.Env):
             mujoco.mj_step(self.model, self.data)                                   # 模拟一步
             
             # Render if viewer is available
-            if self.render_mode and self.handle:
+            if self.visualization and self.handle:
                 self.handle.sync()
 
         if self.gs_render:
@@ -765,10 +996,22 @@ class PiperEnv(gym.Env):
         reward, reward_dict = self._compute_reward()
         
         # Check termination conditions
-        object_fell = self._check_object_fell_off_table(self.bottle_body_name)
-        object_tipped = self._check_object_tipped(self.bottle_body_name)
-        terminated = self.goal_reached or object_fell or object_tipped
+        object_fell = bool(reward_dict.get("object_fell", 0.0))
+        object_tipped = bool(reward_dict.get("object_tipped", 0.0))
+        table_contact = bool(reward_dict.get("table_contact", 0.0))
+        table_contact_terminated = bool(reward_dict.get("table_contact_terminated", 0.0))
+        terminated = self.goal_reached or object_fell or object_tipped or table_contact_terminated
         truncated = self.step_number >= self.episode_len
+
+        terminated_reasons = []
+        if self.goal_reached:
+            terminated_reasons.append("success")
+        if object_fell:
+            terminated_reasons.append("object_fell")
+        if object_tipped:
+            terminated_reasons.append("object_tipped")
+        if table_contact_terminated:
+            terminated_reasons.append("table_contact")
 
 
         info = {
@@ -777,9 +1020,31 @@ class PiperEnv(gym.Env):
             'step_number': self.step_number,
             'current_qpos': new_qpos.copy(),
             'delta_action': delta_action.copy(),
-            'reward_dict': reward_dict,
-            'object_fell': object_fell,
-            'object_tipped': object_tipped,
+            'terminated_reasons': terminated_reasons,
+            'reward_info': {
+                'reaching': float(reward_dict.get("reaching", 0.0)),
+                'reach_base': float(reward_dict.get("reach_base", 0.0)),
+                'reach_base_pos': float(reward_dict.get("reach_base_pos", 0.0)),
+                'reach_base_angle': float(reward_dict.get("reach_base_angle", 0.0)),
+                'reach_base_progress': float(reward_dict.get("reach_base_progress", 0.0)),
+                'reach_ee': float(reward_dict.get("reach_ee", 0.0)),
+                'reach_ee_orient': float(reward_dict.get("reach_ee_orient", 0.0)),
+                'gripper_open_ratio': float(reward_dict.get("gripper_open_ratio", 0.0)),
+                'grasp_ready': bool(reward_dict.get("grasp_ready", 0.0)),
+                'base_ready_reward': float(reward_dict.get("base_ready_reward", 0.0)),
+                'ee_ready_reward': float(reward_dict.get("ee_ready_reward", 0.0)),
+                'catch_reward': float(reward_dict.get("catch_reward", 0.0)),
+                'catch_success': bool(reward_dict.get("catch_success", 0.0)),
+                'lifting': float(reward_dict.get("lifting", 0.0)),
+                'lift_success_bonus': float(reward_dict.get("lift_success_bonus", 0.0)),
+            },
+            'penalty_info': {
+                'object_fell': object_fell,
+                'object_tipped': object_tipped,
+                'table_contact': table_contact,
+                'table_contact_count': int(reward_dict.get("table_contact_count", 0)),
+                'penalties': float(reward_dict.get("penalties", 0.0)),
+            },
         }
 
         return observation, reward, terminated, truncated, info
@@ -857,13 +1122,13 @@ class PiperEnv(gym.Env):
 
 def make_env():
     """Factory function to create PiperEnv for left arm fruit picking."""
-    return PiperEnv(render_mode=None)
+    return PiperEnv(visualization=False)
 
 import cv2
 import numpy as np
 if __name__ == "__main__":
 
-    env = PiperEnv(render_mode="human")  # Left arm only
+    env = PiperEnv(visualization=True)  # Left arm only
  
 
     print("=== Left Arm Fruit Picking Task ===")
@@ -874,10 +1139,10 @@ if __name__ == "__main__":
     while True:
         # action = env.action_space.sample()
         action = [0.0] * 10
-        print(f"Sampled action: {action}")
+        # print(f"Sampled action: {action}")
         obs, reward, terminated, truncated, info = env.step(action)
-        print(f'state = {obs["state"]}')
-        print(f"reward={reward:.3f}")
+        # print(f'state = {obs["state"]}')
+        # print(f"reward={reward:.3f}")
 
     # print("Demo completed successfully!")
     # env.close()

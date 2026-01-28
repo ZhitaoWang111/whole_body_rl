@@ -9,8 +9,8 @@ class NatureCNN(nn.Module):
 
         self.feature_size = 0
         feature_size = 256
-        in_channels=sample_obs["rgb"].shape[-1]
-        image_size=(sample_obs["rgb"].shape[1], sample_obs["rgb"].shape[2])
+        in_channels=sample_obs["top_rgb"].shape[-1]
+        image_size=(sample_obs["top_rgb"].shape[1], sample_obs["top_rgb"].shape[2])
 
         # here we use a NatureCNN architecture to process images, but any architecture is permissble here
         cnn = nn.Sequential(
@@ -35,9 +35,9 @@ class NatureCNN(nn.Module):
 
         # to easily figure out the dimensions after flattening, we pass a test tensor
         with torch.no_grad():
-            n_flatten = cnn(sample_obs["rgb"].float().permute(0,3,1,2).cpu()).shape[1]
+            n_flatten = cnn(sample_obs["top_rgb"].float().permute(0,3,1,2).cpu()).shape[1]
         fc = nn.Sequential(nn.Linear(n_flatten, feature_size), nn.ReLU())
-        extractors["rgb"] = nn.Sequential(cnn, fc)
+        extractors["top_rgb"] = nn.Sequential(cnn, fc)
         self.feature_size += feature_size
 
         # Add wrist camera processing with same architecture
@@ -113,7 +113,7 @@ class NatureCNN(nn.Module):
         # self.extractors contain nn.Modules that do all the processing.
         for key, extractor in self.extractors.items():
             obs = observations[key]
-            if key in ["rgb", "left_wrist_rgb", "right_wrist_rgb"]:
+            if key in ["top_rgb", "left_wrist_rgb", "right_wrist_rgb"]:
                 obs = obs.float().permute(0,3,1,2)
                 obs = obs / 255
             encoded_tensor_list.append(extractor(obs))
@@ -134,15 +134,15 @@ class NatureCNN(nn.Module):
 #             )
 
 #         extractors = {}
-#         device = sample_obs["rgb"].device
-#         H, W, C = sample_obs["rgb"].shape[1:4]
+#         device = sample_obs["top_rgb"].device
+#         H, W, C = sample_obs["top_rgb"].shape[1:4]
 
 #         # rgb
 #         cnn = make_nature_cnn(C)
 #         with torch.no_grad():
 #             n_flatten = cnn(torch.zeros(1, C, H, W, device=device)).shape[1]
 #         fc = nn.Sequential(nn.Linear(n_flatten, feature_size), nn.ReLU())
-#         extractors["rgb"] = nn.Sequential(cnn, fc)
+#         extractors["top_rgb"] = nn.Sequential(cnn, fc)
 #         self.feature_size += feature_size
 
 #         # left wrist
@@ -174,7 +174,7 @@ class NatureCNN(nn.Module):
 
 #     def forward(self, observations):
 #         outs = []
-#         for key in ("rgb", "left_wrist_rgb", "right_wrist_rgb", "state"):
+#         for key in ("top_rgb", "left_wrist_rgb", "right_wrist_rgb", "state"):
 #             if key not in self.extractors or key not in observations:
 #                 continue
 #             x = observations[key]
